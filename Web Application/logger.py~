@@ -1,0 +1,5 @@
+def getlog():
+	destination = open('/home/zozanh/sharedmal/target.exe', 'wb+')
+    
+    destination.close()
+
