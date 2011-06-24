@@ -1,0 +1,20 @@
+from django.conf.urls.defaults import patterns, include, url
+from front import upload_file
+# Uncomment the next two lines to enable the admin:
+# from django.contrib import admin
+# admin.autodiscover()
+
+urlpatterns = patterns('',
+    # Examples:
+    # url(r'^$', 'thesis.views.home', name='home'),
+    # url(r'^thesis/', include('thesis.foo.urls')),
+    url(r'^$', upload_file),
+    url(r'^report/$', render_report),
+    
+
+    # Uncomment the admin/doc line below to enable admin documentation:
+    # url(r'^admin/doc/', include('django.contrib.admindocs.urls')),
+
+    # Uncomment the next line to enable the admin:
+    # url(r'^admin/', include(admin.site.urls)),
+)

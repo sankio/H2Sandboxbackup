@@ -1,0 +1,317 @@
+import sys
+import time
+
+from logger import clean_log
+from accountant import do_job
+from logger import getlog
+from symbol import except_clause
+import vboxapi
+from vboxapi import VirtualBoxManager
+
+
+__author__ = "zozanh"
+__date__ = "$Apr 19, 2011 12:16:16 PM$"
+
+g_hascolors = True
+term_colors = {
+    'red':'\033[31m',
+    'blue':'\033[94m',
+    'green':'\033[92m',
+    'yellow':'\033[93m',
+    'magenta':'\033[35m'
+    }
+g_executing = False
+
+def colored(string, color):
+    if not g_hascolors:
+        return string
+    global term_colors
+    col = term_colors.get(color, None)
+    if col:
+        return col + str(string) + '\033[0m'
+    else:
+        return string
+
+def progressBar(ctx, p, wait=1000):
+    try:
+        while not p.completed:
+            print "%s" % p.percent
+            sys.stdout.flush()
+            p.waitForCompletion(wait)
+            ctx['global'].waitForEvents(0)
+        return 1
+    except KeyboardInterrupt:
+        print "Interrupted."
+        if p.cancelable:
+            print "Canceling task..."
+            p.cancel()
+        return 0
+
+def connect(ctx, args):
+    if (len(args) > 4):
+        print "usage: connect url <username> <passwd>"
+        return 0
+
+    if ctx['vb'] is not None:
+        print "Already connected, disconnect first..."
+        return 0
+
+    if (len(args) > 1):
+        url = args[0]
+    else:
+        url = None
+
+    if (len(args) > 2):
+        user = args[1]
+    else:
+        user = ""
+
+    if (len(args) > 3):
+        passwd = args[2]
+        print passwd
+    else:
+        passwd = ""
+    
+    ctx['wsinfo'] = [url, user, passwd]
+    vbox = ctx['global'].platform.connect(url, user, passwd)
+    ctx['vb'] = vbox
+    print "Initialized connection to VirtualBox version %s" % (vbox.version)
+    ctx['perf'] = ctx['global'].getPerfCollector(ctx['vb'])
+    return 0
+
+def disconnect(ctx, args):
+    if (len(args) != 1):
+        print len(args)
+        print "usage: disconnect"
+        return 0
+
+    if ctx['vb'] is None:
+        print "Not connected yet."
+        return 0
+
+    try:
+        ctx['global'].platform.disconnect()
+        print "disconnected"
+    except:
+        print "failed"
+        ctx['vb'] = None
+        raise
+
+    ctx['vb'] = None
+    return 0
+
+def reconnect(ctx, args):
+    if ctx['wsinfo'] is None:
+        print "Never connected..."
+        return 0
+
+    try:
+        ctx['global'].platform.disconnect()
+    except:
+        pass
+
+    [url, user, passwd] = ctx['wsinfo']
+    ctx['vb'] = ctx['global'].platform.connect(url, user, passwd)
+    print "Running VirtualBox version %s" % (ctx['vb'].version)
+    return 0
+
+def getMachines(ctx, invalidate=False, simple=False):
+    if ctx['vb'] is not None:
+        if ctx['_machlist'] is None or invalidate:
+            ctx['_machlist'] = ctx['global'].getArray(ctx['vb'], 'machines')
+#            ctx['_machlistsimple'] = cacheMachines(ctx,ctx['_machlist'])
+        if simple:
+            return ctx['_machlistsimple']
+        else:
+            return ctx['_machlist']
+    else:
+        return []
+
+def machineByName(ctx, name):
+    mach = None
+    for m in getMachines(ctx, False, False):
+        if m.name == name:
+            mach = m
+            break
+        mid = str(m.id)
+        if mid[0] == '{':
+            mid = mid[1:-1]
+        if mid == id:
+            mach = m
+            break
+    return mach
+    
+def execInGuest(ctx, session, args, env, user, passwd, tmo):
+    if len(args) < 1:
+        print "exec in guest needs at least program name"
+        return
+#    mgr = ctx['mgr']
+#    vb = ctx['vb']
+    env = ["CD="]
+    console = session.getConsole()
+    guest = console.guest
+    # shall contain program name as argv[0]
+    gargs = args
+    print "executing %s with args %s as %s" % (args[0], gargs, user)
+    (progress, pid) = guest.executeProcess(args[0], 0, gargs, env, user, passwd, tmo)
+    print "executed with pid %d" % (pid)
+    time.sleep(68)
+    if pid != 0:
+        pass
+#        try:
+#            while True:
+#                data = guest.getProcessOutput(pid, 0, 1000, 4096)
+#                if data and len(data) > 0:
+#                    #sys.stdout.write(data)
+#                    print data
+#                    continue
+#                progress.waitForCompletion(5)
+#                ctx['global'].waitForEvents(0)
+#                data = guest.getProcessOutput(pid, 0, 0, 4096)
+#                if data and len(data) > 0:
+#                    #sys.stdout.write(data)
+#                    print data
+#                    continue
+#                if progress.completed:
+#                    break
+#
+#        except KeyboardInterrupt:
+#            print "Interrupted."
+#            if progress.cancelable:
+#                progress.cancel()
+#        (reason, code, flags) = guest.getProcessStatus(pid)
+#        print "Exit code: %d" %(code)
+#        return 0
+    else:
+        pass
+#        reportError(ctx, progress)
+
+def pauseGuest(ctx, session):
+    console = session.getConsole()
+    p = console.saveState()
+    p.waitForCompletion(-1)
+    ctx['global'].waitForEvents(0)
+    print "Done Pause"
+    return 0
+
+def restoreSnapshot(ctx, session, uuid, name):
+    vb = ctx["vb"]
+    vb.openSession(session, uuid)
+    if (name == None):
+        name = "prebuild"
+    machine = session.getMachine()
+    snap = machine.findSnapshot(name)
+    console = session.getConsole()
+    p = console.restoreSnapshot(snap)
+    p.waitForCompletion(-1)
+    ctx['global'].waitForEvents(0)
+    print "Done restore"
+    return 0
+
+def startVm(ctx, mach, type, f, sha):
+    mgr = ctx['mgr']
+    vb = ctx['vb']
+    session = mgr.perf = ctx['perf']
+    session = mgr.getSessionObject(vb)
+    uuid = mach.id
+    from datetime import datetime
+    start_time = datetime.now()
+    end_time = datetime.now()
+    try:
+        snap = mach.currentSnapshot
+        if snap.name != "testing":
+            raise Exception        
+        progress = vb.openRemoteSession(session, uuid, type, "")
+        with open('/home/zozanh/sharedmal/target.exe', 'wb+') as destination:
+            for chunk in f.chunks():
+                destination.write(chunk)
+        clean_log()
+        if progressBar(ctx, progress, 100) and int(progress.resultCode) == 0:
+
+                execInGuest(ctx, session, ["C:\\WINDOWS\\system32\\PrototypeI.exe"], None, "zozanh", "12345", -1)
+                pauseGuest(ctx, session)
+                end_time = datetime.now()
+                time.sleep(1)
+                getlog({"SHA1": sha, "End Time": end_time, "Start Time": start_time, "File Name": f.name, "File Size": f.size}, sha)
+                do_job(sha)
+                file = open("/home/zozanh/env/djcode/thesis/static/data/" + sha + '/fin.log', "wr+")
+                file.close()
+                restoreSnapshot(ctx, session, uuid, "testing")
+                time.sleep(1)
+                # we ignore exceptions to allow starting VM even if
+                # perf collector cannot be started
+    #            if perf:
+    #                try:
+    #                    perf.setup(['*'], [mach], 10, 15)
+    #                except Exception, e:
+    #                    printErr(ctx, e)
+    #                    if g_verbose:
+    #                        traceback.print_exc()
+                # if session not opened, close doesn't make sense
+                session.close()
+        else:
+            pass
+#            reportError(ctx, progress)
+    except Exception:
+        return False
+    return True
+
+if __name__ == "__main__":
+    print "Hello World"
+    style = "WEBSERVICE"
+    myManager = VirtualBoxManager(style, None)
+    ctx = {'global':myManager,
+        'mgr':myManager.mgr,
+        'vb': None,
+        'const':myManager.constants,
+        'remote':myManager.remote,
+        'type':myManager.type,
+#           'run': lambda cmd,args: runCommandCb(ctx, cmd, args),
+#           'guestlambda': lambda id,guestLambda,args: runGuestCommandCb(ctx, id, guestLambda, args),
+#           'machById': lambda id: machById(ctx,id),
+#           'argsToMach': lambda args: argsToMach(ctx,args),
+#           'progressBar': lambda p: progressBar(ctx,p),
+#           'typeInGuest': typeInGuest,
+    '_machlist': None,
+#           'prompt': g_prompt
+    }
+    connect(ctx, ["http://localhost:18083/", "test", "test"])
+    oMachine = machineByName(ctx, "prethesis")
+    startVm(ctx, oMachine, "gui")
+    
+def calling(f, sha):
+    print "Hello World"
+    style = "WEBSERVICE"
+    myManager = VirtualBoxManager(style, None)
+    if (not f or not sha):
+        file = open("/home/zozanh/Desktop/fin.log", "wr+")
+        file.close()
+    ctx = {'global':myManager,
+        'mgr':myManager.mgr,
+        'vb': None,
+        'const':myManager.constants,
+        'remote':myManager.remote,
+        'type':myManager.type,
+    #           'run': lambda cmd,args: runCommandCb(ctx, cmd, args),
+    #           'guestlambda': lambda id,guestLambda,args: runGuestCommandCb(ctx, id, guestLambda, args),
+    #           'machById': lambda id: machById(ctx,id),
+    #           'argsToMach': lambda args: argsToMach(ctx,args),
+    #           'progressBar': lambda p: progressBar(ctx,p),
+    #           'typeInGuest': typeInGuest,
+        '_machlist': None,
+    #           'prompt': g_prompt
+        }
+    connect(ctx, ["http://localhost:18083/", "h2sandbox", "dynamix"])
+    oMachine = machineByName(ctx, "prethesis")
+    if startVm(ctx, oMachine, "gui", f, sha):
+        disconnect(ctx, ("h2sandbox", ))
+        return True
+    else:
+        disconnect(ctx, ("h2sandbox", ))
+        return False
+
+
+
+
+
+
